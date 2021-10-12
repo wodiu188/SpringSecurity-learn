@@ -1403,8 +1403,6 @@ authenticate()主要的认证方法:
 
 
 
-
-
 ### 配置多数据源
 
 ![image-20211009150724088](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211009150724088.png)
@@ -1531,3 +1529,430 @@ public class KaptchaAuthenticationProvider extends DaoAuthenticationProvider {
     }
 ```
 
+
+
+### 基础组件
+
+由于Spring Security中大量采用了Java配置，许多过滤器都是直接new出来的，这些直接new出来的对象并不会自动注入到Spring容器中。所以第一个组件是用来注册到容器中
+
+#### ObjectPostProcessor:对一个成功创建的实例使用这个类进行补充
+
+```java
+public interface ObjectPostProcessor<T> {
+	<O extends T> O postProcess(O object);
+}
+```
+
+该接口有两个实现类:
+
+- AutowireBeanFactoryObjectPostProcessor:使用该类的postProcess方法将类加载进去
+- CompositeObjectPostProcessor:是ObjectPostProcessor的集合,里面有一个关于该接口的List对象调用实现方法实际就是遍历List并使用postProcess方法进行处理,Security使用的后置对象就是这个方法,但默认只有一个AutowireBeanFactoryObjectPostProcessor
+
+每个过滤器都有一个configurer的配置器,这些过滤器就是在配置器中new出来并使用postProcess进行处理
+
+
+
+#### SecurityFilterChain:过滤器链对象
+
+该接口的代码
+
+```java
+public interface SecurityFilterChain {
+    boolean matches(HttpServletRequest var1);
+
+    List<Filter> getFilters();
+}
+```
+
+- matches:用来处理是否能够被该过滤器链处理
+- getFilters:返回所有的过滤器
+
+该接口只有一个实现类DefaultSecurityFilterChain
+
+该过滤器链可能会有多个
+
+
+
+#### SecurityBuilder:构建所有需要的对象
+
+![image-20211011093037215](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211011093037215.png)
+
+
+
+##### HttpSecurityBuilder：
+
+```java
+
+public interface HttpSecurityBuilder<H extends HttpSecurityBuilder<H>> extends SecurityBuilder<DefaultSecurityFilterChain> {
+    //获取配置器
+    <C extends SecurityConfigurer<DefaultSecurityFilterChain, H>> C getConfigurer(Class<C> var1);
+	//移除配置器
+    <C extends SecurityConfigurer<DefaultSecurityFilterChain, H>> C removeConfigurer(Class<C> var1);
+	//设置一个可以在各个配置器间共享的对象
+    <C> void setSharedObject(Class<C> var1, C var2);
+	//获取一个可以在各个配置器间共享的对象
+    <C> C getSharedObject(Class<C> var1);
+	//配置认证器
+    H authenticationProvider(AuthenticationProvider var1);
+	//配置数据源
+    H userDetailsService(UserDetailsService var1) throws Exception;
+	//之后添加一个过滤器
+    H addFilterAfter(Filter var1, Class<? extends Filter> var2);
+	//之前添加一个过滤器
+    H addFilterBefore(Filter var1, Class<? extends Filter> var2);
+	//添加一个过滤器
+    H addFilter(Filter var1);
+}
+```
+
+
+
+##### AbstractSecurityBuilder:
+
+该确保Build方法只Build一次
+
+```java
+public final O build() throws Exception {
+    if (this.building.compareAndSet(false, true)) {
+        this.object = this.doBuild();
+        return this.object;
+    } else {
+        throw new AlreadyBuiltException("This object has already been built");
+    }
+}
+```
+
+关于方法被设为finalhttps://www.cnblogs.com/frankyou/p/6022959.html
+
+- 第一,防止后续的继承修改该方法
+- 第二,对应程序较少的方法提升效率
+
+该类虽然实现了只build一次但是没有实现具体的build而是交给他的doBuild抽象方法
+
+
+
+##### AbstractConfiguredSecurityBuilder:
+
+首先该类定义了一个枚举类:
+
+```java
+private static enum BuildState {
+    UNBUILT(0),//配置前
+    INITIALIZING(1),//初始化中
+    CONFIGURING(2),//配置中
+    BUILDING(3),//构件中
+    BUILT(4);//构建完成
+    //....省略
+}
+```
+
+首先声明了一个configurers变量用来保存所有的配置类,关于该类的方法:
+
+- apply:添加配置类(调用add方法实现)
+- add:方法用来将所有的配置类保存到configurers中，在添加的过程中，如果==allowConfigurersOfSameType变量为true，则表示允许相同类型的配置类存在==，也就是List集合中可以存在多个相同类型的配置类。默认情况下，如果是普通配置类，allowConfigurersOfSameType是false，所以List集合中的配置类始终只有一个配置类；如果在AuthenticationManagerBuilder中设置allowConfigurersOfSameType为true，此时相同类型的配置类可以有多个
+- getConfigurers:方法可以从configurers中返回某一个配置类对应的所有实例
+- removeConfigurers:可以移除某一个配置类的所有实例
+- getConfigurer方法也是获取配置类实例，但是只获取集合中第一项。
+- removeConfigurer方法可以从configurers中移除某一个配置类对应的所有配置类实例，并返回被移除掉的配置类实例中的第一项。
+
+
+
+由于该类继承了AbstractSecurityBuilder所有需要实现onBuild
+
+```java
+protected final O doBuild() throws Exception {
+    synchronized(this.configurers) {
+        this.buildState = AbstractConfiguredSecurityBuilder.BuildState.INITIALIZING;
+        this.beforeInit();
+        this.init();
+        this.buildState = AbstractConfiguredSecurityBuilder.BuildState.CONFIGURING;
+        this.beforeConfigure();
+        this.configure();
+        this.buildState = AbstractConfiguredSecurityBuilder.BuildState.BUILDING;
+        O result = this.performBuild();
+        this.buildState = AbstractConfiguredSecurityBuilder.BuildState.BUILT;
+        return result;
+    }
+}
+```
+
+可以看出这个方法是synchronized并且还是final的
+
+首先init();是遍历所有配置类,并完成初始化
+
+configure();完成所有配置类的配置
+
+performBuild();最终完成构建操作
+
+
+
+##### ProviderManagerBuilder
+
+该接口是继承SecurityBuilder类并新增了一个Authentication authenticate(Authentication authentication)方法
+
+
+
+##### AuthenticationManagerBuilder
+
+继承自[AbstractConfiguredSecurityBuilder](#AbstractConfiguredSecurityBuilder)并实现了ProviderManagerBuilder接口
+
+- 构造方法
+
+  - ```java
+        public AuthenticationManagerBuilder(ObjectPostProcessor<Object> objectPostProcessor) {
+            super(objectPostProcessor, true);
+        }
+    ```
+
+    可以看出调用了父类的构造方法也就是AbstractConfiguredSecurityBuilder的构造并且传递了true(允许相同类型的配置类同时存在)
+
+- parentAuthenticationManager:给一个AuthenticationManager设置parent在[ProviderManager](#ProviderManager)中提到如果认证失败就去父类再次认证
+
+- inMemoryAuthentication、jdbcAuthentication以及userDetailsService:配置数据源
+
+- authenticationProvider:该方法用来向authenticationProviders集合中添加AuthenticationProvider对象
+
+- performBuild:执行具体的构建工作
+
+
+
+#### HttpSecurity
+
+构建一条过滤器链并反应到代码上,用于构建DefaultSecurityFilterChain
+
+DefaultSecurityFilterChain包含一个路径匹配器和多个SpringSecurity过滤器,HttpSecurity会收集各种xxxconfigurers并将其放入父类的configurers中,要构建的时候再用这些configurer进行构建同时添加到HttpSecurity的filters
+
+由于很多重复的源码所以这里以form表单登录配置为例
+
+```java
+public FormLoginConfigurer<HttpSecurity> formLogin() throws Exception {
+    return (FormLoginConfigurer)this.getOrApply(new FormLoginConfigurer());
+}
+
+public HttpSecurity formLogin(Customizer<FormLoginConfigurer<HttpSecurity>> formLoginCustomizer) throws Exception {
+    formLoginCustomizer.customize((FormLoginConfigurer)this.getOrApply(new FormLoginConfigurer()));
+    return this;
+}
+```
+
+可以看出一个有参一个无参,无参的返回FormLoginConfigurer对象然后可以继续配置,对于有参来说直接传递一个配置类即可完成配置然后返回HttpSecurity来继续进行其他配置,还记得SecurityConfig这个自己的配置文件吗
+
+![image-20211011165450240](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211011165450240.png)
+
+可以看出and后返回的就是HttpSecurity
+
+
+
+并且有参和无参方法都调用了:
+
+```java
+private <C extends SecurityConfigurerAdapter<DefaultSecurityFilterChain, HttpSecurity>> C getOrApply(C configurer) throws Exception {
+    C existingConfig = (SecurityConfigurerAdapter)this.getConfigurer(configurer.getClass());
+    return existingConfig != null ? existingConfig : this.apply(configurer);
+}
+```
+
+该方法就是调用父类的getConfigurer方法查看是否存在配置类有的话直接返回没有则使用父类的apply调用添加
+
+
+
+其他的配置都和这个类似
+
+
+
+- 每一套过滤器链都会有一个AuthenticationManager对象来进行认证操作（如果认证失败，则会调用AuthenticationManager的parent再次进行认证），主要是通过authentication Provider方法配置执行认证的authenticationProvider对象，通过userDetailsService方法配置UserDetailsService，最后在beforeConfigure方法中触发AuthenticationManager对象的构建。
+
+- performBuild方法则是进行DefaultSecurityFilterChain对象的构建，传入请求匹配器和过滤器集合filters，在构建之前，会先按照既定的顺序对filters进行排序。
+
+- 通过addFilterAfter、addFilterBefore两个方法，我们可以在某一个过滤器之后或者之前添加一个自定义的过滤器（该方法已在HttpSecurityBuilder中声明，此处是具体实现）。
+- addFilter方法可以向过滤器链中添加一个过滤器，这个过滤器必须是Spring Security框架提供的过滤器的一个实例或者其扩展。实际上，在每一个xxxConfigurer的configure方法中，都会调用addFilter方法将构建好的过滤器添加到HttpSecurity中的filters集合中（addFilter方法已在HttpSecurityBuilder中声明，此处是具体实现）。
+- addFilterAt方法可以在指定位置添加一个过滤器。需要注意的是，在同一个位置添加多个过滤器并不会覆盖现有的过滤器。
+
+
+
+#### WebSecurity
+
+HttpSecurity是装配了DefaultSecurityFilterChain,但可能存在多个HttpSecurity也就是存在多个DefaultSecurityFilterChain,这个类的作用是将这些整合成一个FilterChainProxy对象
+
+- 变量ignoredRequests:保存了所有被忽略的请求
+- 变量securityFilterChainBuilders:该集合用来保存所有的HttpSecurity对象
+- 变量httpFirewall:用来配置请求防火墙
+- performBuild:该方法首先统计过滤总数,创建一个securityFilterChains,遍历被忽略的请求并分别构建成DefaultSecurityFilterChain对象保存到securityFilterChains集合中但是只有请求匹配器没有过滤链,这样就可以不用过滤直接放行了,然后securityFilterChain Builders集合，调用每个对象的build方法构建DefaultSecurityFilterChain并存入securityFilter Chains集合中，然后传入securityFilterChains集合构建FilterChainProxy对象，最后再设置HTTP防火墙。所有设置完成之后，最后返回filterChainProxy对象。
+
+
+
+#### FilterChainProxy
+
+- 变量filterChains:用来保存过滤链
+- 变量filterChainValidator:过滤器配置链完成后的认证器
+- 变量firewall:防火墙
+
+
+
+主要运行方法doFilter:
+
+>首先该方法会先定义一个变量,检查是否为第一次执行是的话会在过滤链结束后清空SecurityContextHolder,这是防止没有配置SecurityContextPersistenceFilter,关键的过滤处理在doFilterInternal中
+
+doFilterInternal源码:
+
+```java
+ private void doFilterInternal(ServletRequest request, ServletResponse response, FilterChain chain) throws IOException, ServletException {
+        FirewalledRequest firewallRequest = this.firewall.getFirewalledRequest((HttpServletRequest)request);
+        HttpServletResponse firewallResponse = this.firewall.getFirewalledResponse((HttpServletResponse)response);
+        List<Filter> filters = this.getFilters((HttpServletRequest)firewallRequest);
+        if (filters != null && filters.size() != 0) {
+            if (logger.isDebugEnabled()) {
+                logger.debug(LogMessage.of(() -> {
+                    return "Securing " + requestLine(firewallRequest);
+                }));
+            }
+
+            FilterChainProxy.VirtualFilterChain virtualFilterChain = new FilterChainProxy.VirtualFilterChain(firewallRequest, chain, filters);
+            virtualFilterChain.doFilter(firewallRequest, firewallResponse);
+        } else {
+            if (logger.isTraceEnabled()) {
+                logger.trace(LogMessage.of(() -> {
+                    return "No security for " + requestLine(firewallRequest);
+                }));
+            }
+
+            firewallRequest.reset();
+            chain.doFilter(firewallRequest, firewallResponse);
+        }
+    }
+```
+
+首先会通过防火墙类来创建firewallRequest和firewallResponse
+
+再从getFilters中获取到适合的filters过滤链如果为空就跳回WebFilter(最外层过滤链,相当于过滤结束),否则就根据获得的过滤链进行变量,并且对每个链都创建一个virtualFilterChain然后继续过滤
+
+再来看virtualFilterChain(部分源代码):
+
+```java
+ private static final class VirtualFilterChain implements FilterChain {
+        private final FilterChain originalChain;
+        private final List<Filter> additionalFilters;
+        private final FirewalledRequest firewalledRequest;
+        private final int size;
+        private int currentPosition;
+public void doFilter(ServletRequest request, ServletResponse response) throws IOException, ServletException {
+            if (this.currentPosition == this.size) {
+                if (FilterChainProxy.logger.isDebugEnabled()) {
+                    FilterChainProxy.logger.debug(LogMessage.of(() -> {
+                        return "Secured " + FilterChainProxy.requestLine(this.firewalledRequest);
+                    }));
+                }
+
+                this.firewalledRequest.reset();
+                this.originalChain.doFilter(request, response);
+            } else {
+                ++this.currentPosition;
+                Filter nextFilter = (Filter)this.additionalFilters.get(this.currentPosition - 1);
+                if (FilterChainProxy.logger.isTraceEnabled()) {
+                    FilterChainProxy.logger.trace(LogMessage.format("Invoking %s (%d/%d)", nextFilter.getClass().getSimpleName(), this.currentPosition, this.size));
+                }
+
+                nextFilter.doFilter(request, response, this);
+            }
+        }
+     }
+```
+
+- 变量originalChain:用来跳回WebFilter
+- 变量additionalFilters:本次要进行过滤的过滤器链
+- 变量firewalledRequest:用户请求
+- 变量size:请求链大小
+- 变量currentPosition:当前请求链位置
+
+在doFilter方法中，会首先判断当前执行的下标是否等于过滤器链的大小，如果相等，则说明整个过滤器链中的所有过滤器都已经挨个走一遍了，此时先对Http防火墙中的属性进行重置，然后调用originalChain.doFilter方法跳出Spring Security Filter，回到Web Filter；如果不相等，则currentPosition自增，然后从过滤器链集合中取出一个过滤器去执行，注意执行的时候第三个参数this表示当前对象（即VirtualFilterChain），这样在每一个过滤器执行完之后，最后的chain.doFilter方法又会回到当前doFilter方法中，继续下一个过滤器的调用。
+
+
+
+#### SecurityConfigurer
+
+![image-20211011200219902](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211011200219902.png)
+
+从名字上面看就大概知道该接口是用来初始化和配置类的配置
+
+因为有很多的过滤器,而每个过滤器都有一个XXXconfigurer所以子类很多
+
+下图为一小部分
+
+![image-20211011200608279](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211011200608279.png)
+
+首先我们来看最开始配置的,目前位置最熟悉的配置类的父类的兄弟类:dog:
+
+##### SecurityConfigurerAdapter
+
+- 为每个配置类都提供了一个SecurityBuilder,使用build创建对象使用and返回对象,这里就和前面的一样
+
+- 定义了内部类CompositeObjectPostProcessor，这是一个复合的对象后置处理器
+
+- 提供了一个addObjectPostProcessor方法，通过该方法可以向复合的对象后置处理器中添加新的ObjectPostProcessor实例
+
+
+
+##### UserDetailsAwareConfigurer
+
+他的子类主要用于认证配置的相关组件,例如UserDetailsService,但是获取UserDetailsService的方法为抽象方法需要在子类中实现
+
+![image-20211012091022619](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211012091022619.png)
+
+- AbstractDaoAuthenticationConfigurer:完成对DaoAuthenticationProvider的配置
+- UserDetailsServiceConfigurer:完成对UserDetailsService的配置
+- UserDetailsManagerConfigurer:使用UserDetailsManager构建用户对象，完成对AuthenticationManagerBuilder的填充
+- JdbcUserDetailsManagerConfigurer:配置JdbcUserDetailsManager并填充到Authentication ManagerBuilder中
+- InMemoryUserDetailsManagerConfigurer:配置InMemoryUserDetailsManager
+- DaoAuthenticationConfigurer:完成对DaoAuthenticationProvider的配置
+
+
+
+##### AbstractHttpConfigurer
+
+主要是为了给在HttpSecurity中使用的配置类添加一个方便的父类，提取出共同的操作
+
+- disable表示禁用某一个配置（第2章中我们配置的.csrf().disable()），本质上就是从构建器的configurers集合中移除某一个配置类，这样在将来构建的时候就不存在该配置类，那么对应的功能也就不存在（被禁用）
+
+- withObjectPostProcessor表示给某一个对象添加一个对象后置处理器，由于该方法的返回值是当前对象，所以该方法可以用在链式配置中。
+
+下面是他的子类
+
+![Figure-T138_115736](D:\package_and_data\Book\JdReaderEBooks\jd_4657302ffcbc3\30712708_dir_img\OEBPS\Images\Figure-T138_115736.jpg)
+
+
+
+##### GlobalAuthenticationConfigurerAdapter
+
+用于配置全局AuthenticationManagerBuilder
+
+在介绍ProviderManager时曾经提到过，默认情况下ProviderManager有一个parent，这个parent就是通过这里的全局AuthenticationManagerBuilder来构建的
+
+![image-20211012093313969](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211012093313969.png)
+
+他的继承关系为上图
+
+- InitializeAuthenticationProviderBeanManagerConfigurer：初始化全局的AuthenticationProvider对象
+- InitializeAuthenticationProviderManagerConfigurer：配置全局的AuthenticationProvider对象，配置过程就是从Spring容器中查找AuthenticationProvider并设置给全局的AuthenticationManagerBuilder对象。
+- InitializeUserDetailsBeanManagerConfigurer：初始化全局的UserDetailsService对象。
+- InitializeUserDetailsManagerConfigurer：配置全局的UserDetailsService对象，配置过程就是从Spring容器中查找
+- UserDetailsService，并设置给全局的AuthenticationManagerBuilder对象。
+- EnableGlobalAuthenticationAutowiredConfigurer：从Spring容器中加载被@EnableGlobal Authentication注解标记的Bean。
+
+
+
+##### WebSecurityConfigurer
+
+空接口
+
+
+
+##### WebSecurityConfigurerAdapter
+
+大多数情况下我们继承他来创建securityConfig
+
+有两个AuthenticationManagerBuilder对象用来构建AuthenticationManager
+
+- private AuthenticationManagerBuilder authenticationBuilder
+  - 用于配置局部他和每个HttpSecurity进行绑定
+- private AuthenticationManagerBuilder localConfigureAuthenticationBldr
+  - 是所有局部AuthenticationManager的parent,但是如果没有重写configure(AuthenticationManagerBuilder)方法全局的AuthenticationManager对象是由AuthenticationConfiguration类中的getAuthenticationManager方法提供的，如果用户重写了configure(AuthenticationManagerBuilder)方法，则全局的AuthenticationManager就由localConfigureAuthenticationBldr负责构建
