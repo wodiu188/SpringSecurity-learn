@@ -1395,7 +1395,7 @@ authenticate()主要的认证方法:
 
 ##### AbstractAuthenticationProcessingFilter
 
-任何登录请求都会经过该过滤链他的实现类为UsernamePasswordAuthenticationFilter
+任何登录请求都会经过该过滤链器的实现类为UsernamePasswordAuthenticationFilter
 
 
 
@@ -1956,4 +1956,1018 @@ public void doFilter(ServletRequest request, ServletResponse response) throws IO
   - 用于配置局部他和每个HttpSecurity进行绑定
 - private AuthenticationManagerBuilder localConfigureAuthenticationBldr
   - 是所有局部AuthenticationManager的parent,但是如果没有重写configure(AuthenticationManagerBuilder)方法全局的AuthenticationManager对象是由AuthenticationConfiguration类中的getAuthenticationManager方法提供的，如果用户重写了configure(AuthenticationManagerBuilder)方法，则全局的AuthenticationManager就由localConfigureAuthenticationBldr负责构建
+
+ 
+
+#### 扩展
+
+
+
+##### ObjectPostProcessor
+
+所有过滤器创建后由ObjectPostProcessor来添加到Bean中一般调用过程为，ObjectPostProcessor的实例类CompositeObjectPostProcessor调用postProcess方法，而该方法会遍历该类所维护的ObjectPostProcessor对象的postProcess方法，也就是该类的实现类AutowireBeanFactoryObjectPostProcessor的postProcess方法，这个对象会将对象注入到Bean容器中
+
+> 也可以自己定义ObjectPostProcessor然后注入到CompositeObjectPostProcessor的List列表中这样在注册到Bean中还能个性化配置例如动态权限配置
+
+
+
+我们可以使用如下方法来配置ObjectPostProcessor
+
+![image-20211013152326388](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211013152326388.png)
+
+
+
+##### 多种定义
+
+1. 局部定义数据源
+
+   - ![image-20211013194636900](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211013194636900.png)
+
+2. 全局定义
+
+   - ```java
+      @Configuration
+         public class SecurityConfig extends WebSecurityConfigurerAdapter {
+            @Bean
+            UserDetailsService us() {
+                InMemoryUserDetailsManager users = new InMemoryUserDetailsManager();
+                users.createUser(User.withUsername("江南一点雨")
+                        .password("{noop}123").roles("admin").build());
+                return users;
+            }
+       
+     ```
+
+     
+
+3. 全局定义2
+
+   - ```java
+           @Override
+            protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+                auth.inMemoryAuthentication().withUser("javagirl")
+                        .password("{noop}123")
+                        .roles("admin");
+            }
+     ```
+
+
+
+##### 配置多个过滤器
+
+![image-20211014102143194](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211014102143194.png)
+
+注意了要配置多个相同的配置类要指定顺序,数字越大优先级越低。当请求到来时，会按照过滤器链的优先级从高往低，依次进行匹配。
+
+
+
+##### 静态资源过滤
+
+![image-20211014102537560](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211014102537560.png)
+
+例如要过滤上面的资源
+
+```java
+@Configuration
+public class SecurityConfig extends WebSecurityConfigurerAdapter {   
+	@Override
+    public void configure(WebSecurity web) throws Exception {
+        web.ignoring().antMatchers("/login.html", "/css/**", "/js/**","/images/**");
+        super.configure(web);
+    }
+}
+```
+
+
+
+##### 利用过滤器实现验证码认证==没理解==
+
+![image-20211014152500985](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211014152500985.png)
+
+![image-20211014152627110](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211014152627110.png)
+
+
+
+### 密码加密
+
+PasswordEncoder加密接口
+
+```java
+   public interface PasswordEncoder {
+       String encode(CharSequence rawPassword);
+       boolean matches(CharSequence rawPassword, String encodedPassword);
+       default boolean upgradeEncoding(String encodedPassword) {
+           return false;
+       }
+    }
+```
+
+- encode:进行加密
+- matches:密码比对
+- upgradeEncoding:加密升级
+
+
+
+##### 常见加密类
+
+- BCryptPasswordEncoder自带盐降低运行速度
+
+- Argon2PasswordEncoder为了解决在定制硬件上密码容易被破解的问题
+
+- Pbkdf2PasswordEncoder:和前面几种类似，PBKDF2算法也是一种故意降低运算速度的算法，当需要FIPS（Federal Information Processing Standard，美国联邦信息处理标准）认证时，PBKDF2算法是一个很好的选择。
+- SCryptPasswordEncoder:也是一种故意降低运算速度的算法，而且需要大量内存
+
+这四种就是我们前面所说的自适应单向函数加密。除了这几种，还有一些基于消息摘要算法的加密方案，这些方案都已经不再安全，但是出于兼容性考虑，Spring Security并未移除相关类，主要有LdapShaPasswordEncoder、MessageDigestPasswordEncoder、Md4Password Encoder、StandardPasswordEncoder以及NoOpPasswordEncoder（密码明文存储），这五种皆已废弃，这里对这些类也不做过多介绍。
+
+
+
+##### DelegatingPasswordEncoder(现在系统默认的)
+
+该类是一个代理类使用代理类的好处有:
+
+- 兼容性:可以帮助很多旧密码加密的系统顺利迁移到spring security,允许同一系统出现多种加密方式
+- 便捷性:由于加密方式肯能会改变使用代理类直接修改加密方案而不用大量修改
+- 稳定性:作为一个框架，Spring Security不能经常进行重大更改，而使用Delegating PasswordEncoder可以方便地对密码进行升级(自动从一个加密方案升级到另外一个加密方案)。
+
+![image-20211015151833725](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211015151833725.png)
+
+查看源码即可看出PREFIX为包含加密类型的前缀SUFFIX为包含加密类型的后缀
+
+idForEncode为加密类型
+
+passwordEncoderForEncode为当前加密类型
+
+idToPasswordEncoder里面存放着字符串和加密类的映射
+
+defaultPasswordEncoderForMatches存放着默认的密码匹配类,(默认调用该类会直接报错)
+
+
+
+而==DelegatingPasswordEncoder==是由==PasswordEncoderFactories==类的静态方法==createDelegatingPasswordEncoder==提供的
+
+```java
+public final class PasswordEncoderFactories {
+    private PasswordEncoderFactories() {
+    }
+
+    public static PasswordEncoder createDelegatingPasswordEncoder() {
+        String encodingId = "bcrypt";
+        Map<String, PasswordEncoder> encoders = new HashMap();
+        encoders.put(encodingId, new BCryptPasswordEncoder());
+        encoders.put("ldap", new LdapShaPasswordEncoder());
+        encoders.put("MD4", new Md4PasswordEncoder());
+        encoders.put("MD5", new MessageDigestPasswordEncoder("MD5"));
+        encoders.put("noop", NoOpPasswordEncoder.getInstance());
+        encoders.put("pbkdf2", new Pbkdf2PasswordEncoder());
+        encoders.put("scrypt", new SCryptPasswordEncoder());
+        encoders.put("SHA-1", new MessageDigestPasswordEncoder("SHA-1"));
+        encoders.put("SHA-256", new MessageDigestPasswordEncoder("SHA-256"));
+        encoders.put("sha256", new StandardPasswordEncoder());
+        encoders.put("argon2", new Argon2PasswordEncoder());
+        return new DelegatingPasswordEncoder(encodingId, encoders);
+    }
+}
+```
+
+通过上面这个类可以看出我们可以自己定义类
+
+```java
+   @Configuration
+    public class SecurityConfig extends WebSecurityConfigurerAdapter {
+       @Autowired
+       UserService userService;
+       @Bean
+       PasswordEncoder passwordEncoder() {
+           String encodingId = "bcrypt";
+           Map<String, PasswordEncoder> encoders = new HashMap<>();
+           encoders.put(encodingId, new BCryptPasswordEncoder(31));
+           encoders.put("ldap", new LdapShaPasswordEncoder());
+          encoders.put("MD4", new Md4PasswordEncoder());
+           encoders.put("MD5", new MessageDigestPasswordEncoder("MD5"));
+           encoders.put("noop", NoOpPasswordEncoder.getInstance());
+           encoders.put("pbkdf2", new Pbkdf2PasswordEncoder());
+           encoders.put("scrypt", new SCryptPasswordEncoder());
+           encoders.put("SHA-1", new MessageDigestPasswordEncoder("SHA-1"));
+           encoders.put("SHA-256", new MessageDigestPasswordEncoder("SHA-256"));
+           encoders.put("sha256", new StandardPasswordEncoder());
+           encoders.put("argon2", new Argon2PasswordEncoder());
+           return new DelegatingPasswordEncoder(encodingId, encoders);
+       }
+    }
+```
+
+这样就可以自己定义升级BCryptPasswordEncoder(从10升级到31)
+
+
+
+
+
+##### 实践一下
+
+```java
+
+@Configuration
+public class EncodeConfig extends WebSecurityConfigurerAdapter {
+
+    @Bean
+    BCryptPasswordEncoder bCryptPasswordEncoder(){
+        return new BCryptPasswordEncoder();
+    }
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication()
+                .withUser("YH")
+                .password("$2a$10$697P6xxcoe904JkL8dT//OZCX9t1ZC9DzItog8NpnAVPXNdoEblHC")
+                .roles("admin");
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http.authorizeRequests()
+                .anyRequest()
+                .authenticated()
+                .and()
+                .formLogin()
+                .and()
+                .csrf().disable();
+    }
+}
+```
+
+这个配置类就可以实现加密,密码为123456的BCryptPasswordEncoder加密,这种方式是直接用bean替换掉系统默认的DelegatingPasswordEncoder
+
+这样就可以直接传递一个123456的密文即可
+
+或者不进行替换而是加上一个前缀如下:
+
+```java
+
+@Configuration
+public class EncodeConfig extends WebSecurityConfigurerAdapter {
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication()
+                .withUser("YH")
+                .password("{bcrypt}$2a$10$697P6xxcoe904JkL8dT//OZCX9t1ZC9DzItog8NpnAVPXNdoEblHC")
+                .roles("admin");
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http.authorizeRequests()
+                .anyRequest()
+                .authenticated()
+                .and()
+                .formLogin()
+                .and()
+                .csrf().disable();
+    }
+}
+```
+
+
+
+##### 加密升级
+
+首先对MyUserDetailsService继续实现UserDetailsPasswordService实现后代码为
+
+```java
+
+@Service
+public class MyUserDetailsService implements UserDetailsService, UserDetailsPasswordService {
+
+    @Autowired
+    UserMapper userMapper;
+
+    @Override
+    public UserDetails loadUserByUsername(String username) throws UsernameNotFoundException {
+        User user = userMapper.loadUserByUsername(username);
+        if(user==null){
+            throw new UsernameNotFoundException("用户不存在");
+        }
+        user.setRoles(userMapper.getRolesByUid(user.getId()));
+        return user;
+    }
+    
+    
+    
+    
+    //新增
+    @Override
+    public UserDetails updatePassword(UserDetails user, String newPassword) {
+
+        int i = userMapper.updatePassword(user.getUsername(), newPassword);
+        if(i==1){
+            ((User) user).setPassword(newPassword);
+        }
+        return user;
+    }
+}
+```
+
+mapper中新增后结果
+
+```java
+@Mapper
+@Repository
+public interface UserMapper {
+
+    List<Role> getRolesByUid(Integer id);
+
+    User loadUserByUsername(String username);
+    
+    
+	//新增
+    int updatePassword(String username,String password);
+
+}
+
+```
+
+
+
+下面仅有部分代码
+
+```java
+public class SecurityConfig extends WebSecurityConfigurerAdapter {
+    
+	@Autowired
+    MyUserDetailsService service;
+    
+     protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.userDetailsService(service);
+    }
+}
+```
+
+
+
+再mapper.xml文件中新增
+
+```xml
+    <update id="updatePassword">
+        update user set password=#{password} where username=#{username};
+    </update>
+```
+
+新增完成后查看数据库
+
+![image-20211015162454709](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211015162454709.png)
+
+刚刚使用admin登录了发现系统对其进行升级了
+
+
+
+### RememberMe
+
+```java
+
+
+@Configuration
+public class RememberMeConfig extends WebSecurityConfigurerAdapter {
+
+    @Bean
+    PasswordEncoder passwordEncoder(){
+        return NoOpPasswordEncoder.getInstance();
+    }
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication()
+                .withUser("YH")
+                .password("123456")
+                .roles("admin");
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+
+        http.authorizeRequests()
+                .anyRequest()
+                .authenticated()
+                .and()
+                .formLogin()
+                .and()
+                .rememberMe()
+                .key("YH")
+                .and()
+                .logout()
+                .logoutUrl("/logout")
+                .clearAuthentication(true)
+                .permitAll()
+                .invalidateHttpSession(true)
+                .and()
+                .csrf()
+                .disable();
+
+    }
+}
+```
+
+配置文件==.rememberMe.key(String)==这两个就可以进行
+
+然后我们再浏览器中登录并勾选rememberMe就可以再cookie中发现
+
+![image-20211018095056097](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211018095056097.png)一个是JSESSIONID的95549F19FC543F06965A04397B83FC85,即真正的认证cookie
+
+
+
+这种方法如果获取了rememberMe后可以无记录的登录该账号并获取该账号的权限，所以我们可以添加一个<异地登陆>来记录不同的会话
+
+
+
+重写配置文件
+
+```java
+
+@Configuration
+public class RememberMeConfig extends WebSecurityConfigurerAdapter {
+
+    @Autowired
+    DataSource dataSource;
+
+    @Bean
+    PasswordEncoder passwordEncoder(){
+        return NoOpPasswordEncoder.getInstance();
+    }
+
+    @Bean
+    JdbcTokenRepositoryImpl jdbcTokenRepository(){
+        JdbcTokenRepositoryImpl repository = new JdbcTokenRepositoryImpl();
+        repository.setDataSource(dataSource);
+        return repository;
+    }
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication()
+                .withUser("YH")
+                .password("123456")
+                .roles("admin");
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http.authorizeRequests()
+                .anyRequest()
+                .authenticated()
+                .and()
+                .formLogin()
+                .and()
+                .rememberMe()
+                .tokenRepository(jdbcTokenRepository())
+                .key("YH")
+                .and()
+                .logout()
+                .logoutUrl("/logout")
+                .clearAuthentication(true)
+                .permitAll()
+                .invalidateHttpSession(true)
+                .and()
+                .csrf()
+                .disable();
+    }
+}
+```
+
+导入依赖
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-jdbc</artifactId>
+</dependency>
+
+<dependency>
+    <groupId>mysql</groupId>
+    <artifactId>mysql-connector-java</artifactId>
+</dependency>
+```
+
+
+
+使用JdbcTokenRepositoryImpl类的CREATE_TABLE_SQL常量来创建数据库
+
+运行并登录勾选rememberMe后到数据库中查看
+
+可以看到一个为series一个为token(具体细节是在下一节讲到PersistentTokenBasedRememberMeServices的processAutoLoginCookie方法)
+
+![image-20211018113008540](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211018113008540.png)
+
+有新的会话就会覆盖token,登出就会清空
+
+由于rememberMe可能会带来不安全所以要启用二次认证来对敏感信息进行验证
+
+例如使用rememberMe的方式登录后要访问一些敏感信息就需要转到登录页面
+
+例子如下：
+
+```java
+@ResponseBody
+@RequestMapping("/index")
+public String index(){
+    return "success Login";
+}
+@ResponseBody
+@RequestMapping("/hello")
+public String hello(){
+    return "hello";
+}
+```
+
+然后针对不同的请求设置不同的敏感信息
+
+```java
+ protected void configure(HttpSecurity http) throws Exception {
+        http.authorizeRequests()
+                .antMatchers("/hello").fullyAuthenticated()
+                .antMatchers("/index").rememberMe()
+                .anyRequest()
+                .authenticated()
+                .and();
+ }
+```
+
+这样登录成功后无法访问/index,关闭浏览器再重新打开可以发现能访问/index但不能访问/hello(需要重新登录)
+
+
+
+#### 关于RememberMe的接口
+
+RememberMeServices一共有三个方法
+
+```java
+public interface RememberMeServices {
+ 	//用于提取需要的参数进行验证
+    Authentication autoLogin(HttpServletRequest var1, HttpServletResponse var2);
+	//登录失败的操作
+    void loginFail(HttpServletRequest var1, HttpServletResponse var2);
+	//登录成功的操作
+    void loginSuccess(HttpServletRequest var1, HttpServletResponse var2, Authentication var3);
+}
+```
+
+
+
+主要有三个实现
+
+- AbstractRememberMeServices:用来实现RememberMeServices的三个接口
+  - PersistentTokenBasedRememberMeServices
+  - TokenBasedRememberMeServices
+
+AbstractRememberMeServices:部分源代码如下
+
+```java
+
+    public final Authentication autoLogin(HttpServletRequest request, HttpServletResponse response) {
+        String rememberMeCookie = this.extractRememberMeCookie(request);
+        if (rememberMeCookie == null) {
+            return null;
+        } else {
+            this.logger.debug("Remember-me cookie detected");
+            if (rememberMeCookie.length() == 0) {
+                this.logger.debug("Cookie was empty");
+                this.cancelCookie(request, response);
+                return null;
+            } else {
+                try {
+                    String[] cookieTokens = this.decodeCookie(rememberMeCookie);
+                    UserDetails user = this.processAutoLoginCookie(cookieTokens, request, response);
+                    this.userDetailsChecker.check(user);
+                    this.logger.debug("Remember-me cookie accepted");
+                    return this.createSuccessfulAuthentication(request, user);
+                } catch (CookieTheftException var6) {
+                    this.cancelCookie(request, response);
+                    throw var6;
+                } catch (UsernameNotFoundException var7) {
+                    this.logger.debug("Remember-me login was valid but corresponding user not found.", var7);
+                } catch (InvalidCookieException var8) {
+                    this.logger.debug("Invalid remember-me cookie: " + var8.getMessage());
+                } catch (AccountStatusException var9) {
+                    this.logger.debug("Invalid UserDetails: " + var9.getMessage());
+                } catch (RememberMeAuthenticationException var10) {
+                    this.logger.debug(var10.getMessage());
+                }
+
+                this.cancelCookie(request, response);
+                return null;
+            }
+        }
+    }
+
+    protected String extractRememberMeCookie(HttpServletRequest request) {
+        Cookie[] cookies = request.getCookies();
+        if (cookies != null && cookies.length != 0) {
+            Cookie[] var3 = cookies;
+            int var4 = cookies.length;
+
+            for(int var5 = 0; var5 < var4; ++var5) {
+                Cookie cookie = var3[var5];
+                if (this.cookieName.equals(cookie.getName())) {
+                    return cookie.getValue();
+                }
+            }
+
+            return null;
+        } else {
+            return null;
+        }
+    }
+
+    protected String[] decodeCookie(String cookieValue) throws InvalidCookieException {
+        for(int j = 0; j < cookieValue.length() % 4; ++j) {
+            cookieValue = cookieValue + "=";
+        }
+
+        String cookieAsPlainText;
+        try {
+            cookieAsPlainText = new String(Base64.getDecoder().decode(cookieValue.getBytes()));
+        } catch (IllegalArgumentException var7) {
+            throw new InvalidCookieException("Cookie token was not Base64 encoded; value was '" + cookieValue + "'");
+        }
+
+        String[] tokens = StringUtils.delimitedListToStringArray(cookieAsPlainText, ":");
+
+        for(int i = 0; i < tokens.length; ++i) {
+            try {
+                tokens[i] = URLDecoder.decode(tokens[i], StandardCharsets.UTF_8.toString());
+            } catch (UnsupportedEncodingException var6) {
+                this.logger.error(var6.getMessage(), var6);
+            }
+        }
+
+        return tokens;
+    }
+
+
+    public final void loginFail(HttpServletRequest request, HttpServletResponse response) {
+        this.logger.debug("Interactive login attempt was unsuccessful.");
+        this.cancelCookie(request, response);
+        this.onLoginFail(request, response);
+    }
+
+    protected void onLoginFail(HttpServletRequest request, HttpServletResponse response) {
+    }
+
+    public final void loginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) {
+        if (!this.rememberMeRequested(request, this.parameter)) {
+            this.logger.debug("Remember-me login not requested.");
+        } else {
+            this.onLoginSuccess(request, response, successfulAuthentication);
+        }
+    }
+
+    protected abstract UserDetails processAutoLoginCookie(String[] var1, HttpServletRequest var2, HttpServletResponse var3) throws RememberMeAuthenticationException, UsernameNotFoundException;
+
+```
+
+主要执行方法autoLogin
+
+> 首先使用extractRememberMeCookie()方法来获取request中的cookie,如果cookie符合条件则先用decodeCookie进行
+>
+> base64解码(如果令牌字符串长度不是4的倍数，则在令牌末尾补上一个或者多个“=”，以使其长度变为4的倍数)
+>
+> 之后执行processAutoLoginCookie()方法这个方法是个抽象方法,在他的子类(PersistentTokenBasedRememberMeServices)里面实现,该方法作用是验证cookie如果符合条件则将用户信息放进去.
+>
+> 最后调用createSuccessfulAuthentication方法创建token
+
+接下来让我们看看认证失败调用的方法吧~
+
+```java
+public final void loginFail(HttpServletRequest request, HttpServletResponse response) {
+    this.logger.debug("Interactive login attempt was unsuccessful.");
+    this.cancelCookie(request, response);
+    this.onLoginFail(request, response);
+}
+```
+
+首先取消cookie然后再跳转到onLoginFail()方法==默认是个空方法==
+
+如果登录成功则
+
+```java
+public final void loginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) {
+    if (!this.rememberMeRequested(request, this.parameter)) {
+        this.logger.debug("Remember-me login not requested.");
+    } else {
+        this.onLoginSuccess(request, response, successfulAuthentication);
+    }
+}
+
+protected abstract void onLoginSuccess(HttpServletRequest var1, HttpServletResponse var2, Authentication var3);
+```
+
+登录成功时，会首先调用rememberMeRequested方法，判断当前请求是否开启了自动登录。开发者可以在服务端配置alwaysRemember，这样无论前端参数是什么，都会开启自动登录，如果开发者没有配置alwaysRemember，则根据前端传来的remember-me参数进行判断，remember-me参数的值如果是true、on（默认）、yes或者1，表示开启自动登录。如果开启了自动登录，则调用onLoginSuccess方法进行登录成功的处理。onLoginSuccess是一个抽象方法，具体实现在AbstractRememberMeServices的子类中。
+
+
+
+==最后再来看AbstractRememberMeServices中一个比较重要的方法setCookie，在自动登录成功后，将调用该方法把令牌信息放入响应头中并最终返回到前端==
+
+```java
+    protected void setCookie(String[] tokens, int maxAge, HttpServletRequest request, HttpServletResponse response) {
+        String cookieValue = this.encodeCookie(tokens);
+        Cookie cookie = new Cookie(this.cookieName, cookieValue);
+        cookie.setMaxAge(maxAge);
+        cookie.setPath(this.getCookiePath(request));
+        if (this.cookieDomain != null) {
+            cookie.setDomain(this.cookieDomain);
+        }
+
+        if (maxAge < 1) {
+            cookie.setVersion(1);
+        }
+
+        cookie.setSecure(this.useSecureCookie != null ? this.useSecureCookie : request.isSecure());
+        cookie.setHttpOnly(true);
+        response.addCookie(cookie);
+    }
+
+```
+
+
+
+#### TokenBasedRememberMeServices
+
+实现了processAutoLoginCookie方法
+
+```java
+
+protected UserDetails processAutoLoginCookie(String[] cookieTokens, HttpServletRequest request, HttpServletResponse response) {
+    if (cookieTokens.length != 3) {
+        throw new InvalidCookieException("Cookie token did not contain 3 tokens, but contained '" + Arrays.asList(cookieTokens) + "'");
+    } else {
+        long tokenExpiryTime = this.getTokenExpiryTime(cookieTokens);
+        if (this.isTokenExpired(tokenExpiryTime)) {
+            throw new InvalidCookieException("Cookie token[1] has expired (expired on '" + new Date(tokenExpiryTime) + "'; current time is '" + new Date() + "')");
+        } else {
+            UserDetails userDetails = this.getUserDetailsService().loadUserByUsername(cookieTokens[0]);
+            Assert.notNull(userDetails, () -> {
+                return "UserDetailsService " + this.getUserDetailsService() + " returned null for username " + cookieTokens[0] + ". This is an interface contract violation";
+            });
+            String expectedTokenSignature = this.makeTokenSignature(tokenExpiryTime, userDetails.getUsername(), userDetails.getPassword());
+            if (!equals(expectedTokenSignature, cookieTokens[2])) {
+                throw new InvalidCookieException("Cookie token[2] contained signature '" + cookieTokens[2] + "' but expected '" + expectedTokenSignature + "'");
+            } else {
+                return userDetails;
+            }
+        }
+    }
+}
+```
+
+判断cookie长度为3否则报错
+
+获取cookie中的时间戳查看如果超时则报错
+
+获取用户名并去数据库查找如果为空则报错
+
+首先将用户名、令牌过期时间、用户密码以及key组成一个字符串，中间用“:”隔开，然后通过MD5消息摘要算法对该字符串进行加密，并将加密结果转为一个字符串返回。
+
+然后判断加密的字符串与cookie[2]是否相等不相等报错相等则返回用户对象
+
+
+
+实现方法二:
+
+onLoginSuccess
+
+```java
+public void onLoginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) {
+    String username = this.retrieveUserName(successfulAuthentication);
+    String password = this.retrievePassword(successfulAuthentication);
+    if (!StringUtils.hasLength(username)) {
+        this.logger.debug("Unable to retrieve username");
+    } else {
+        if (!StringUtils.hasLength(password)) {
+            UserDetails user = this.getUserDetailsService().loadUserByUsername(username);
+            password = user.getPassword();
+            if (!StringUtils.hasLength(password)) {
+                this.logger.debug("Unable to obtain password for user: " + username);
+                return;
+            }
+        }
+
+        int tokenLifetime = this.calculateLoginLifetime(request, successfulAuthentication);
+        long expiryTime = System.currentTimeMillis();
+        expiryTime += 1000L * (long)(tokenLifetime < 0 ? 1209600 : tokenLifetime);
+        String signatureValue = this.makeTokenSignature(expiryTime, username, password);
+        this.setCookie(new String[]{username, Long.toString(expiryTime), signatureValue}, tokenLifetime, request, response);
+        if (this.logger.isDebugEnabled()) {
+            this.logger.debug("Added remember-me cookie for user '" + username + "', expiry: '" + new Date(expiryTime) + "'");
+        }
+
+    }
+}
+```
+
+首先获取用户名和密码,判断用户名和密码是否为空,如果密码为空则用用户名去数据库中获取
+
+然后生成一个默认两周时间的令牌,然后根据过期时间、用户名、密码和key来生成一个字符串并将所有信息转换为字符串进行加密并使用base64进行编码加密后发送给前端
+
+#### PersistentTokenBasedRememberMeServices
+
+持久化！令牌认证:smirk:
+
+在持久化令牌中，存储在数据库中的数据被封装成了一个对象PersistentRememberMeToken
+
+```java
+public class PersistentRememberMeToken {
+    private final String username;
+    private final String series;
+    private final String tokenValue;
+    private final Date date;
+}
+```
+
+他和TokenBasedRememberMeServices一样重写了processAutoLoginCookie和onLoginSuccess方法
+
+```java
+
+protected UserDetails processAutoLoginCookie(String[] cookieTokens, HttpServletRequest request, HttpServletResponse response) {
+    if (cookieTokens.length != 2) {
+        throw new InvalidCookieException("Cookie token did not contain 2 tokens, but contained '" + Arrays.asList(cookieTokens) + "'");
+    } else {
+        String presentedSeries = cookieTokens[0];
+        String presentedToken = cookieTokens[1];
+        PersistentRememberMeToken token = this.tokenRepository.getTokenForSeries(presentedSeries);
+        if (token == null) {
+            throw new RememberMeAuthenticationException("No persistent token found for series id: " + presentedSeries);
+        } else if (!presentedToken.equals(token.getTokenValue())) {
+            this.tokenRepository.removeUserTokens(token.getUsername());
+            throw new CookieTheftException(this.messages.getMessage("PersistentTokenBasedRememberMeServices.cookieStolen", "Invalid remember-me token (Series/token) mismatch. Implies previous cookie theft attack."));
+        } else if (token.getDate().getTime() + (long)this.getTokenValiditySeconds() * 1000L < System.currentTimeMillis()) {
+            throw new RememberMeAuthenticationException("Remember-me login has expired");
+        } else {
+            this.logger.debug(LogMessage.format("Refreshing persistent login token for user '%s', series '%s'", token.getUsername(), token.getSeries()));
+            PersistentRememberMeToken newToken = new PersistentRememberMeToken(token.getUsername(), token.getSeries(), this.generateTokenData(), new Date());
+
+            try {
+                this.tokenRepository.updateToken(newToken.getSeries(), newToken.getTokenValue(), newToken.getDate());
+                this.addCookie(newToken, request, response);
+            } catch (Exception var9) {
+                this.logger.error("Failed to update token: ", var9);
+                throw new RememberMeAuthenticationException("Autologin failed due to data access problem");
+            }
+
+            return this.getUserDetailsService().loadUserByUsername(token.getUsername());
+        }
+    }
+}
+```
+
+与TokenBasedRememberMeServices不一样的是该方法从cookie中获取两个值,一个是series另一个为tokene.
+
+首先从tokenRepository中根据series查找是否存在token如果不存在则报错
+
+然后进行验证,验证失败则报错
+
+再然后进行验证是否过期
+
+都通过后则创建一个newtoken(series和用户名不变,日期为当前日期token重新生成)
+
+然后更新数据库的series,token,date
+
+然后将刚刚创建的newtoken放入cookie中
+
+最后根据用户名查找用户信息并返回
+
+
+
+再来看onLoginSuccess
+
+```java
+protected void onLoginSuccess(HttpServletRequest request, HttpServletResponse response, Authentication successfulAuthentication) {
+    String username = successfulAuthentication.getName();
+    this.logger.debug(LogMessage.format("Creating new persistent login for user %s", username));
+    PersistentRememberMeToken persistentToken = new PersistentRememberMeToken(username, this.generateSeriesData(), this.generateTokenData(), new Date());
+
+    try {
+        this.tokenRepository.createNewToken(persistentToken);
+        this.addCookie(persistentToken, request, response);
+    } catch (Exception var7) {
+        this.logger.error("Failed to save persistent token ", var7);
+    }
+
+}
+```
+
+登录成功后，构建一个PersistentRememberMeToken对象，对象中的series和token参数都是随机生成的，然后将生成的对象存入数据库中，再调用addCookie方法添加相关的Cookie信息。
+
+
+
+PersistentTokenBasedRememberMeServices和TokenBasedRememberMeServices还是有一些明显的区别的：前者返回给前端的令牌是将series和token组成的字符串进行Base64编码后返回给前端；后者返回给前端的令牌则是将用户名、过期时间以及签名组成的字符串进行Base64编码后返回给前端。
+
+> 如果开发者配置了tokenRepository，则获取到的RememberMeServices实例是==PersistentTokenBasedRememberMe Services==，否则获取到TokenBasedRememberMeServices，即系统通过有没有配置tokenRepository来确定使用哪种类型的RememberMeServices。
+
+
+
+#### 从配置文件中来看
+
+解释不清了上图!!!!!!
+
+![image-20211019145309554](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211019145309554.png)
+
+看见吗返回的时RememberMeConfigurer
+
+而这个类的爹是AbstractHttpConfigurer它实现的又是SecurityConfigurer
+
+在源码中得知该类重写了init方法和config方法
+
+```java
+public void init(H http) throws Exception {
+    this.validateInput();
+    String key = this.getKey();
+    RememberMeServices rememberMeServices = this.getRememberMeServices(http, key);
+    http.setSharedObject(RememberMeServices.class, rememberMeServices);
+    LogoutConfigurer<H> logoutConfigurer = (LogoutConfigurer)http.getConfigurer(LogoutConfigurer.class);
+    if (logoutConfigurer != null && this.logoutHandler != null) {
+        logoutConfigurer.addLogoutHandler(this.logoutHandler);
+    }
+
+    RememberMeAuthenticationProvider authenticationProvider = new RememberMeAuthenticationProvider(key);
+    authenticationProvider = (RememberMeAuthenticationProvider)this.postProcess(authenticationProvider);
+    http.authenticationProvider(authenticationProvider);
+    this.initDefaultLoginFilter(http);
+}
+```
+
+validateInput方法是用来判断rememberMeServices是否为空和cookie中是否有remember-me字段
+
+之后会获取key如果没有设置key则会使用UUID
+
+> 如果开发者使用普通的RememberMe，即没有使用持久化令牌，则建议开发者自行配置该key，因为使用默认的UUID字符串，系统每次重启都会生成新的key，会导致之前下发的remember-me失效。
+
+有了key之后，接下来再去获取RememberMeServices实例，如果开发者配置了tokenRepository，则获取到的RememberMeServices实例是PersistentTokenBasedRememberMe Services，否则获取到TokenBasedRememberMeServices，即系统通过有没有配置tokenRepository来确定使用哪种类型的RememberMeServices。
+
+之后就会调用RememberMeAuthenticationProvider(key);方法来创建一个认证类主要用来校验key
+
+
+
+再来看config方法
+
+```java
+public void configure(H http) {
+    RememberMeAuthenticationFilter rememberMeFilter = new RememberMeAuthenticationFilter((AuthenticationManager)http.getSharedObject(AuthenticationManager.class), this.rememberMeServices);
+    if (this.authenticationSuccessHandler != null) {
+        rememberMeFilter.setAuthenticationSuccessHandler(this.authenticationSuccessHandler);
+    }
+
+    rememberMeFilter = (RememberMeAuthenticationFilter)this.postProcess(rememberMeFilter);
+    http.addFilter(rememberMeFilter);
+}
+```
+
+configure方法中主要创建了一个RememberMeAuthenticationFilter，创建时传入Remember MeServices实例，最后将创建好的RememberMeAuthenticationFilter加入到过滤器链中。
+
+
+
+然后看看RememberMeAuthenticationFilter的doFilter方法是怎么运行的
+
+```java
+
+private void doFilter(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws IOException, ServletException {
+    if (SecurityContextHolder.getContext().getAuthentication() != null) {
+        this.logger.debug(LogMessage.of(() -> {
+            return "SecurityContextHolder not populated with remember-me token, as it already contained: '" + SecurityContextHolder.getContext().getAuthentication() + "'";
+        }));
+        chain.doFilter(request, response);
+    } else {
+        Authentication rememberMeAuth = this.rememberMeServices.autoLogin(request, response);
+        if (rememberMeAuth != null) {
+            try {
+                rememberMeAuth = this.authenticationManager.authenticate(rememberMeAuth);
+                SecurityContextHolder.getContext().setAuthentication(rememberMeAuth);
+                this.onSuccessfulAuthentication(request, response, rememberMeAuth);
+                this.logger.debug(LogMessage.of(() -> {
+                    return "SecurityContextHolder populated with remember-me token: '" + SecurityContextHolder.getContext().getAuthentication() + "'";
+                }));
+                if (this.eventPublisher != null) {
+                    this.eventPublisher.publishEvent(new InteractiveAuthenticationSuccessEvent(SecurityContextHolder.getContext().getAuthentication(), this.getClass()));
+                }
+
+                if (this.successHandler != null) {
+                    this.successHandler.onAuthenticationSuccess(request, response, rememberMeAuth);
+                    return;
+                }
+            } catch (AuthenticationException var6) {
+                this.logger.debug(LogMessage.format("SecurityContextHolder not populated with remember-me token, as AuthenticationManager rejected Authentication returned by RememberMeServices: '%s'; invalidating remember-me token", rememberMeAuth), var6);
+                this.rememberMeServices.loginFail(request, response);
+                this.onUnsuccessfulAuthentication(request, response, var6);
+            }
+        }
+
+        chain.doFilter(request, response);
+    }
+}
+```
+
+首先判断是否登陆过,没有登陆过则进行自动登录(就是前两节说的实现了autoLogin方法),如果自动登录后返回null,则登录失败.
+
+当登录成功后则调用authenticate方法对key进行校验成功后会将用户数据放入SecurityContextHolder中,并报告登录成功(但不调用loginSuccess方法)
+
+> 最后再额外说一下RememberMeServices#loginSuccess方法的调用位置。该方法是在AbstractAuthenticationProcessingFilter#successfulAuthentication中触发的，也就是说，无论你是否开启了RememberMe功能，该方法都会被调用。只不过在RememberMeServices#loginSuccess方法的具体实现中，会去判断是否开启了RememberMe，进而决定是否在响应中添加对应的Cookie。
+
+如果自动登录失败，则调用rememberMeServices.loginFail方法处理登录失败回调。onUnsuccessfulAuthentication和onSuccessfulAuthentication都是该过滤器中定义的空方法，并没有任何实现。
 
