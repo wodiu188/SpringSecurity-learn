@@ -2971,3 +2971,534 @@ private void doFilter(HttpServletRequest request, HttpServletResponse response, 
 
 如果自动登录失败，则调用rememberMeServices.loginFail方法处理登录失败回调。onUnsuccessfulAuthentication和onSuccessfulAuthentication都是该过滤器中定义的空方法，并没有任何实现。
 
+
+
+### 会话
+
+HttpSession相关的功能由SessionManagementFilter和SessionAuthenticationStrategy接口来处理，SessionManagementFilter过滤器将Session相关操作委托给SessionAuthenticationStrategy接口去完成。
+
+#### 并发管理
+
+就是同一时间允许几个用户同时登录
+
+```java
+
+@Configuration
+public class SessionConfig extends WebSecurityConfigurerAdapter {
+
+    @Override
+    protected void configure(AuthenticationManagerBuilder auth) throws Exception {
+        auth.inMemoryAuthentication().withUser("YH").password("{noop}123456").roles("admin");
+    }
+
+    @Override
+    protected void configure(HttpSecurity http) throws Exception {
+        http.authorizeRequests()
+                .anyRequest()
+                .authenticated()
+                .and()
+                .formLogin()
+                .and()
+                .csrf()
+                .disable()
+                .sessionManagement()
+                .maximumSessions(1);//只允许一个用户
+    }
+
+    @Bean
+    HttpSessionEventPublisher httpSessionEventPublisher(){
+        return new HttpSessionEventPublisher();
+    }
+
+}
+```
+
+例如这种定义方式只允许一个用户登陆
+
+而HttpSessionEventPublisher则是用来监听HttpSession的创建和销毁(当用户登录则会创建,当用户注销则会销毁)
+
+使用上面这种方式后登录的用户会==顶掉==前面的登录用户
+
+例如我在chrome使用YH来登录再用星愿使用YH登录,则chrome用户则会被==顶掉==
+
+![image-20211020102553565](C:\Users\lll\AppData\Roaming\Typora\typora-user-images\image-20211020102553565.png)
+
+如果是前后端分离的项目则需要返回一个json,将config中的内容修改为下面这种
+
+```java
+http.authorizeRequests()
+           .anyRequest().authenticated()
+           .and()
+           .formLogin()
+           .and()
+           .csrf()
+           .disable()
+           .sessionManagement()
+           .maximumSessions(1)
+           .expiredSessionStrategy(event -> {
+               HttpServletResponse response = event.getResponse();
+               response.setContentType("application/json;charset=utf-8");
+               Map<String, Object> result = new HashMap<>();
+               result.put("status", 500);
+               result.put("msg", "当前会话已经失效，请重新登录");
+               String s = new ObjectMapper().writeValueAsString(result);
+               response.getWriter().print(s);
+               response.flushBuffer();
+           });
+```
+
+
+
+如果想要阻止后来的用户登录则设置maxSessionsPreventsLogin(true)
+
+```java
+        http.authorizeRequests()
+                .anyRequest()
+                .authenticated()
+                .and()
+                .formLogin()
+                .and()
+                .csrf()
+                .disable()
+                .sessionManagement()
+                .maximumSessions(1)
+                .maxSessionsPreventsLogin(true);//这里
+```
+
+
+
+
+
+#### 原理
+
+首先是会话记录使用的类
+
+##### SessionInformation
+
+```java
+public class SessionInformation implements Serializable {
+
+	private static final long serialVersionUID = SpringSecurityCoreVersion.SERIAL_VERSION_UID;
+	//最后一次登录时间
+	private Date lastRequest;
+	//用户实体对象
+	private final Object principal;
+	//会话Id
+	private final String sessionId;
+	//会话是否过期
+	private boolean expired = false;
+}
+```
+
+
+
+##### SessionRegistry
+
+是用来维护SessionInformation的信息,而它只有一个实现类SessionRegistryImpl
+
+```java
+public class SessionRegistryImpl implements SessionRegistry, ApplicationListener<AbstractSessionEvent> {
+
+	protected final Log logger = LogFactory.getLog(SessionRegistryImpl.class);
+
+	// <principal:Object,SessionIdSet>
+	private final ConcurrentMap<Object, Set<String>> principals;
+
+	// <sessionId:Object,SessionInformation>
+	private final Map<String, SessionInformation> sessionIds;
+
+	public SessionRegistryImpl() {
+		this.principals = new ConcurrentHashMap<>();
+		this.sessionIds = new ConcurrentHashMap<>();
+	}
+
+	public SessionRegistryImpl(ConcurrentMap<Object, Set<String>> principals,
+			Map<String, SessionInformation> sessionIds) {
+		this.principals = principals;
+		this.sessionIds = sessionIds;
+	}
+
+	@Override
+	public List<Object> getAllPrincipals() {
+		return new ArrayList<>(this.principals.keySet());
+	}
+
+	@Override
+	public List<SessionInformation> getAllSessions(Object principal, boolean includeExpiredSessions) {
+		Set<String> sessionsUsedByPrincipal = this.principals.get(principal);
+		if (sessionsUsedByPrincipal == null) {
+			return Collections.emptyList();
+		}
+		List<SessionInformation> list = new ArrayList<>(sessionsUsedByPrincipal.size());
+		for (String sessionId : sessionsUsedByPrincipal) {
+			SessionInformation sessionInformation = getSessionInformation(sessionId);
+			if (sessionInformation == null) {
+				continue;
+			}
+			if (includeExpiredSessions || !sessionInformation.isExpired()) {
+				list.add(sessionInformation);
+			}
+		}
+		return list;
+	}
+
+	@Override
+	public SessionInformation getSessionInformation(String sessionId) {
+		Assert.hasText(sessionId, "SessionId required as per interface contract");
+		return this.sessionIds.get(sessionId);
+	}
+
+	@Override
+	public void onApplicationEvent(AbstractSessionEvent event) {
+		if (event instanceof SessionDestroyedEvent) {
+			SessionDestroyedEvent sessionDestroyedEvent = (SessionDestroyedEvent) event;
+			String sessionId = sessionDestroyedEvent.getId();
+			removeSessionInformation(sessionId);
+		}
+		else if (event instanceof SessionIdChangedEvent) {
+			SessionIdChangedEvent sessionIdChangedEvent = (SessionIdChangedEvent) event;
+			String oldSessionId = sessionIdChangedEvent.getOldSessionId();
+			if (this.sessionIds.containsKey(oldSessionId)) {
+				Object principal = this.sessionIds.get(oldSessionId).getPrincipal();
+				removeSessionInformation(oldSessionId);
+				registerNewSession(sessionIdChangedEvent.getNewSessionId(), principal);
+			}
+		}
+	}
+
+	@Override
+	public void refreshLastRequest(String sessionId) {
+		Assert.hasText(sessionId, "SessionId required as per interface contract");
+		SessionInformation info = getSessionInformation(sessionId);
+		if (info != null) {
+			info.refreshLastRequest();
+		}
+	}
+
+	@Override
+	public void registerNewSession(String sessionId, Object principal) {
+		Assert.hasText(sessionId, "SessionId required as per interface contract");
+		Assert.notNull(principal, "Principal required as per interface contract");
+		if (getSessionInformation(sessionId) != null) {
+			removeSessionInformation(sessionId);
+		}
+		if (this.logger.isDebugEnabled()) {
+			this.logger.debug(LogMessage.format("Registering session %s, for principal %s", sessionId, principal));
+		}
+		this.sessionIds.put(sessionId, new SessionInformation(principal, sessionId, new Date()));
+		this.principals.compute(principal, (key, sessionsUsedByPrincipal) -> {
+			if (sessionsUsedByPrincipal == null) {
+				sessionsUsedByPrincipal = new CopyOnWriteArraySet<>();
+			}
+			sessionsUsedByPrincipal.add(sessionId);
+			this.logger.trace(LogMessage.format("Sessions used by '%s' : %s", principal, sessionsUsedByPrincipal));
+			return sessionsUsedByPrincipal;
+		});
+	}
+
+	@Override
+	public void removeSessionInformation(String sessionId) {
+		Assert.hasText(sessionId, "SessionId required as per interface contract");
+		SessionInformation info = getSessionInformation(sessionId);
+		if (info == null) {
+			return;
+		}
+		if (this.logger.isTraceEnabled()) {
+			this.logger.debug("Removing session " + sessionId + " from set of registered sessions");
+		}
+		this.sessionIds.remove(sessionId);
+		this.principals.computeIfPresent(info.getPrincipal(), (key, sessionsUsedByPrincipal) -> {
+			this.logger.debug(
+					LogMessage.format("Removing session %s from principal's set of registered sessions", sessionId));
+			sessionsUsedByPrincipal.remove(sessionId);
+			if (sessionsUsedByPrincipal.isEmpty()) {
+				// No need to keep object in principals Map anymore
+				this.logger.debug(LogMessage.format("Removing principal %s from registry", info.getPrincipal()));
+				sessionsUsedByPrincipal = null;
+			}
+			this.logger.trace(
+					LogMessage.format("Sessions used by '%s' : %s", info.getPrincipal(), sessionsUsedByPrincipal));
+			return sessionsUsedByPrincipal;
+		});
+	}
+
+}
+```
+
+- 首先是两个变量
+
+sessionIds:用来根据sessionId来获取session
+
+principals:用来存储用户与sessionId之间的映射关系
+
+> 由于principals集合中采用当前登录用户对象做key，将对象作为集合中的key，需要重写其equals方法和hashCode方法。在前面的案例中，由于我们使用了系统默认定义的User类，该类已经重写了equals方法和hashCode方法。==如果开发者自定义用户类，记得重写其equals方法和hashCode方法==，否则会话并发管理会失效。
+
+- 其次是方法
+
+getAllPrincipals:用来获取所有用户对象
+
+getAllSessions:根据用户名来获取SessionInformation,可以指定是否过去过期的session
+
+onApplicationEvent:根据事件来决定是更新session还是销毁session
+
+registerNewSession:当用户登录成功后，会执行会话保存操作，传入当前请求的sessionId和当前登录主体principal对象。如果sessionId已经存在，则先将其移除，然后先往sessionIds中保存，key是sessionId，value则是一个新创建的SessionInformation对象。在向principals集合中保存时使用了compute方法（如果读者对Java8中的compute方法还不太熟悉，可以自行学习，这里不做过多介绍），第一个参数就是当前登录主体，第二个参数则进行了计算。如果当前登录主体在principals中已经有对应的value，则在value的基础上继续添加一个sessionId。如果当前登录主体在principals中没有对应的value，则新建一个sessionsUsedByPrincipal对象，然后再将sessionId添加进去。
+
+removeSessionInformation:移除session,移除也是两方面的工作，一方面就是从sessionIds变量中移除，这个直接调用remove方法即可；另一方面就是从principals变量中移除，principals中key是当前登录的用户对象，value则是一个集合，里边保存着当前用户对应的所有sessionId，这里主要是移除value中对应的sessionId。
+
+
+
+##### SessionAuthenticationStrategy
+
+主要用于登录成功后对httpSession的操作
+
+实现类有以下几种
+
+- CsrfAuthenticationStrategy：CsrfAuthenticationStrategy和CSRF攻击有关，该类主要负责在身份验证后删除旧的CsrfToken并生成一个新的CsrfToken。
+- ConcurrentSessionControlAuthenticationStrategy：该类主要用来处理Session并发问题。前面案例中Session并发的控制，实际上就是通过该类来完成的。
+- RegisterSessionAuthenticationStrategy：该类用于在认证成功后将HttpSession信息记录到SessionRegistry中。
+- CompositeSessionAuthenticationStrategy：这是一个复合策略，它里边维护了一个集合，集合中保存了多个不同的SessionAuthenticationStrategy对象，相当于该类代理了多个SessionAuthenticationStrategy对象，大部分情况下，在Spring Security框架中直接使用的也是该类的实例。
+- NullAuthenticatedSessionStrategy：这是一个空的实现，未做任何处理。
+- AbstractSessionFixationProtectionStrategy：处理会话固定攻击的基类。
+- ChangeSessionIdAuthenticationStrategy：通过修改sessionId来防止会话固定攻击。
+- SessionFixationProtectionStrategy：通过创建一个新的会话来防止会话固定攻击。
+
+
+
+主要起作用的是:ConcurrentSessionControlAuthenticationStrategy
+
+重点来看onAuthentication方法(实现方法)
+
+```java
+public void onAuthentication(Authentication authentication, HttpServletRequest request, HttpServletResponse response) {
+    int allowedSessions = this.getMaximumSessionsForThisUser(authentication);
+    if (allowedSessions != -1) {
+        List<SessionInformation> sessions = this.sessionRegistry.getAllSessions(authentication.getPrincipal(), false);
+        int sessionCount = sessions.size();
+        if (sessionCount >= allowedSessions) {
+            if (sessionCount == allowedSessions) {
+                HttpSession session = request.getSession(false);
+                if (session != null) {
+                    Iterator var8 = sessions.iterator();
+
+                    while(var8.hasNext()) {
+                        SessionInformation si = (SessionInformation)var8.next();
+                        if (si.getSessionId().equals(session.getId())) {
+                            return;
+                        }
+                    }
+                }
+            }
+
+            this.allowableSessionsExceeded(sessions, allowedSessions, this.sessionRegistry);
+        }
+    }
+}
+```
+
+如果为-1则代表不限制最大登录数则之间返回.
+
+如果小于最大链接数则直接返回
+
+如果等于最大连接数则在session中查找是否存在该session如果存在则直接返回
+
+以上都不满足则进入以下代码
+
+allowableSessionsExceeded
+
+```java
+protected void allowableSessionsExceeded(List<SessionInformation> sessions, int allowableSessions, SessionRegistry registry) throws SessionAuthenticationException {
+    if (!this.exceptionIfMaximumExceeded && sessions != null) {
+        sessions.sort(Comparator.comparing(SessionInformation::getLastRequest));
+        int maximumSessionsExceededBy = sessions.size() - allowableSessions + 1;
+        List<SessionInformation> sessionsToBeExpired = sessions.subList(0, maximumSessionsExceededBy);
+        Iterator var6 = sessionsToBeExpired.iterator();
+
+        while(var6.hasNext()) {
+            SessionInformation session = (SessionInformation)var6.next();
+            session.expireNow();
+        }
+
+    } else {
+        throw new SessionAuthenticationException(this.messages.getMessage("ConcurrentSessionControlAuthenticationStrategy.exceededAllowed", new Object[]{allowableSessions}, "Maximum sessions of {0} for this principal exceeded"));
+    }
+}
+```
+
+如果exceptionIfMaximumExceeded属性为true，则直接抛出异常，该属性的值也就是我们在SecurityConfig中通过maxSessionsPreventsLogin方法配置的值，即禁止后来者登录，抛出异常后，本次登录失败。否则说明不禁止后来者登录，此时对查询出来的当前用户所有登录会话按照最后一次请求时间进行排序，然后计算出需要过期的session数量，从sessions集合中取出来进行遍历，依次调用其expireNow方法使之过期。
+这便是ConcurrentSessionControlAuthenticationStrategy类的实现逻辑。
+
+
+
+###### RegisterSessionAuthenticationStrategy
+
+```java
+public class RegisterSessionAuthenticationStrategy implements SessionAuthenticationStrategy {
+    private final SessionRegistry sessionRegistry;
+
+    public RegisterSessionAuthenticationStrategy(SessionRegistry sessionRegistry) {
+        Assert.notNull(sessionRegistry, "The sessionRegistry cannot be null");
+        this.sessionRegistry = sessionRegistry;
+    }
+
+    public void onAuthentication(Authentication authentication, HttpServletRequest request, HttpServletResponse response) {
+        this.sessionRegistry.registerNewSession(request.getSession().getId(), authentication.getPrincipal());
+    }
+}
+```
+
+可以看出该类就是调用了上面的SessionRegistry的registerNewSession方法来传入sessionid和用户对象
+
+###### CompositeSessionAuthenticationStrategy
+
+查看该类的onAuthentication
+
+```java
+    public void onAuthentication(Authentication authentication, HttpServletRequest request, HttpServletResponse response) throws SessionAuthenticationException {
+        int currentPosition = 0;
+        int size = this.delegateStrategies.size();
+
+        SessionAuthenticationStrategy delegate;
+        for(Iterator var6 = this.delegateStrategies.iterator(); var6.hasNext(); delegate.onAuthentication(authentication, request, response)) {
+            delegate = (SessionAuthenticationStrategy)var6.next();
+            if (this.logger.isTraceEnabled()) {
+                Log var10000 = this.logger;
+                String var10002 = delegate.getClass().getSimpleName();
+                ++currentPosition;
+                var10000.trace(LogMessage.format("Preparing session with %s (%d/%d)", var10002, currentPosition, size));
+            }
+        }
+
+    }
+```
+
+可以看出该方法就是调用各个SessionAuthenticationStrategy的onAuthentication
+
+所以!!!他是一个代理类~~~
+
+
+
+
+
+##### SessionManagementFilter
+
+主要用来处理RememberMe登录时的会话管理：即如果用户使用了RememberMe的方式进行认证，则认证成功后需要进行会话管理，相关的管理操作通过SessionManagementFilter过滤器触发。
+
+通过containsContext方法去判断当前会话中是否存在SPRING_SECURITY_CONTEXT变量,emmm啥时候不存在呢:
+
+（1）用户使用了RememberMe方式进行认证。
+（2）用户匿名访问某一个接口。
+
+然后根据这两种不同的认证则token也不一样第一种为RememberMeAuthenticationToken会对其进行
+
+
+
+##### ConcurrentSessionFilter
+
+在doFilter方法中:
+
+```java
+
+private void doFilter(HttpServletRequest request, HttpServletResponse response, FilterChain chain) throws IOException, ServletException {
+    HttpSession session = request.getSession(false);
+    if (session != null) {
+        SessionInformation info = this.sessionRegistry.getSessionInformation(session.getId());
+        if (info != null) {
+            if (info.isExpired()) {
+                this.logger.debug(LogMessage.of(() -> {
+                    return "Requested session ID " + request.getRequestedSessionId() + " has expired.";
+                }));
+                this.doLogout(request, response);
+                this.sessionInformationExpiredStrategy.onExpiredSessionDetected(new SessionInformationExpiredEvent(info, request, response));
+                return;
+            }
+
+            this.sessionRegistry.refreshLastRequest(info.getSessionId());
+        }
+    }
+```
+
+首先获取session如果不是空则,根据sessionId获取session信息并检测是否为空是否过期,如果都满足则刷新最后一次的请求时间,
+
+如果过期了则进行登出
+
+
+
+HttpSession的四种创建策略
+
+- ALWAYS:HttpSession不存在就创建
+- NEVER:不存在也不创建,如果有就直接使用
+- IF_REQUIRED:如果需要才创建(默认)
+- STATELESS:从不创建HttpSession,也不使用HttpSession(无状态认证)
+
+如果用户想要指定用什么类型则：
+
+```java
+@Override
+protected void configure(HttpSecurity http) throws Exception {
+    http.sessionManagement()
+        .sessionCreationPolicy(SessionCreationPolicy.IF_REQUIRED);
+}
+```
+
+
+
+##### SessionManagementConfigurer
+
+该configurer用来配置上面两个过滤器的
+
+```java
+public void init(H http) {
+    SecurityContextRepository securityContextRepository = (SecurityContextRepository)http.getSharedObject(SecurityContextRepository.class);
+    boolean stateless = this.isStateless();
+    if (securityContextRepository == null) {
+        if (stateless) {
+            http.setSharedObject(SecurityContextRepository.class, new NullSecurityContextRepository());
+        } else {
+            HttpSessionSecurityContextRepository httpSecurityRepository = new HttpSessionSecurityContextRepository();
+            httpSecurityRepository.setDisableUrlRewriting(!this.enableSessionUrlRewriting);
+            httpSecurityRepository.setAllowSessionCreation(this.isAllowSessionCreation());
+            AuthenticationTrustResolver trustResolver = (AuthenticationTrustResolver)http.getSharedObject(AuthenticationTrustResolver.class);
+            if (trustResolver != null) {
+                httpSecurityRepository.setTrustResolver(trustResolver);
+            }
+
+            http.setSharedObject(SecurityContextRepository.class, httpSecurityRepository);
+        }
+    }
+
+    RequestCache requestCache = (RequestCache)http.getSharedObject(RequestCache.class);
+    if (requestCache == null && stateless) {
+        http.setSharedObject(RequestCache.class, new NullRequestCache());
+    }
+
+    http.setSharedObject(SessionAuthenticationStrategy.class, this.getSessionAuthenticationStrategy(http));
+    http.setSharedObject(InvalidSessionStrategy.class, this.getInvalidSessionStrategy());
+}
+```
+
+首先从http中获取SecurityContextRepository，如果不为空则判断是否采用STATELESS策略
+
+如果采用则设置一个NullSecurityContextRepository(空的),如果不是空则保存HttpSessionSecurityContextRepository对象
+
+最后将SessionAuthenticationStrategy和InvalidSessionStrategy放入共享对象中
+
+> 其中SessionAuthenticationStrategy实例是通过getSession AuthenticationStrategy方法来获取的，在该方法中，一共构建了三个SessionAuthentication Strategy实例，分别是ConcurrentSessionControlAuthenticationStrategy、ChangeSessionId AuthenticationStrategy以及RegisterSessionAuthenticationStrategy，并将这三个实例由Composite SessionAuthenticationStrategy进行代理，所以getSessionAuthenticationStrategy方法最终返回的是CompositeSessionAuthenticationStrategy类的实例。
+
+
+
+防御固定会话攻击,在配置文件中做如下配置:
+
+```java
+http.sessionManagement().sessionFixation().changeSessionId();
+```
+
+这个.changeSessionId();可以换成下面这些
+
+> （1）changeSessionId()：用户登录成功后，直接修改HttpSession的SessionId即可，默认方案即此，对应的处理类是ChangeSessionIdAuthenticationStrategy。
+
+> （2）none()：用户登录成功后，HttpSession不做任何变化，对应的处理类是NullAuthenticatedSessionStrategy。
+
+> （3）migrateSession()：用户登录成功后，创建一个新的HttpSession对象，并将旧的HttpSession中的数据拷贝到新的HttpSession中，对应的处理类是SessionFixationProtection Strategy。
+
+> （4）newSession()：用户登录成功后，创建一个新的HttpSession对象，对应的处理类也是SessionFixationProtectionStrategy，只不过将其里边的migrateSessionAttributes属性设置为false。需要注意的是，该方法并非所有的属性都不拷贝，一些Spring Security使用的属性，如请求缓存，还是会从旧的HttpSession上复制到新的HttpSession。
+
